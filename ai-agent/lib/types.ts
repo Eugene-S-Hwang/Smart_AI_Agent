@@ -12,8 +12,7 @@ export type ScenarioCategory = "clear" | "ambiguous" | "adversarial";
 export type SimulateFailure =
   | "none"
   | "llm_timeout"
-  | "malformed_output"
-  | "missing_critical_context";
+  | "malformed_output";
 
 /** Coarse risk bucket from deterministic text analysis — not a fixed list of product features. */
 export type DangerTier = "low" | "medium" | "high";
@@ -88,6 +87,7 @@ export interface DecisionTrace {
   failure?: {
     kind:
       | SimulateFailure
+      | "missing_critical_context"
       | "parse_error"
       | "policy_short_circuit"
       | "provider_error";
@@ -95,4 +95,6 @@ export interface DecisionTrace {
   };
   model_invocation_skipped?: boolean;
   skipped_reason?: string;
+  /** When decision is execute_notify and OpenAI produced a user-facing follow-up (simulated inbox/calendar). */
+  notifyAssistantMessage?: string;
 }

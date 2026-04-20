@@ -10,7 +10,7 @@ Signals summarize **cheap, auditable cues** derived from transcript + structured
 
 ### Proposed-action inference (`lib/proposed-action.ts`)
 
-Regex-style tags describe the **current user intent window** (text after the latest assistant message, or the latest user-only segment). That scopes **bypass attempts** and **risk** to the active request rather than poisoning later turns.
+Regex-style tags are derived from the **latest user message only** (`textForProposedActionInference`). That keeps tier and signal tags aligned with the **current** bubble so a prior harmful or unrelated line does not inflate risk for the next harmless one. Scenario bundles in the UI may still include a `proposedAction` for documentation of the sample thread, but **`resolveEffectiveProposedAction` always returns live inference** — the fixture is not merged in and does not act as a floor on danger.
 
 | Signal (examples) | Role |
 |-------------------|------|
@@ -27,7 +27,7 @@ Each tag nudges an **estimated numeric risk score** (0–1), then a **danger tie
 | **`contradiction_flag`** | Earlier turns express hold/wait/legal review; latest turn is a short affirmative. | Surfaces “looks safe now but thread said stop earlier.” |
 | **`injection_attempt`** | Latest user matches instruction-override phrasing (“ignore previous rules…” — checked on **latest user only**). | Jailbreak-style overrides are policy-relevant regardless of fuzzy semantics. |
 | **`risk_score`**, **`risk_tier`**, **`silent_threshold`** | Combined score from inferred action + language boosts (+ VIP/external combo), capped and bucketed. | Gives the model numeric guardrails aligned with UX thresholds. |
-| **`conversationLanguageRiskBoost` notes** | Combos such as blast + confidential / wire + urgency / bulk calendar destruction. | Catches escalated-impact language in the **current intent window**. |
+| **`conversationLanguageRiskBoost` notes** | Combos such as blast + confidential / wire + urgency / bulk calendar destruction. | Uses the same **latest user message** span as proposed-action inference. |
 | **`vipSensitiveBoost`** | Mentions VIP contacts while external/bulk signals fire. | Extra friction for high-stakes recipients. |
 | **`policy_blocked`** | Injection **or** org “payout freeze” notes in user state while payment signals are present. | Deterministic refusal path for non-negotiable rules. |
 
@@ -38,15 +38,16 @@ Each tag nudges an **estimated numeric risk score** (0–1), then a **danger tie
 **Regular code** owns:
 
 - Parsing and validating API payloads (`DecideRequestBody`).
-- Inferring **`ProposedAction`** from text (deterministic regex).
+- Inferring **`ProposedAction`** from the **latest user line** only (deterministic regex); see above.
 - Computing **`DecisionSignals`** (`computeSignals`).
 - **Hard gates**: if `policy_blocked`, **never** call the LLM — return mandatory refusal (`runDecisionPipeline` short-circuit). Same for **`missing_critical_context`** — deterministic `ask_clarify` without LLM.
-- Provider hygiene: timeouts, malformed JSON, schema validation, safe defaults (**refuse/escalate**) on failure.
-- Mock mode (`EXECUTION_DECISION_USE_MOCK` or missing API key): deterministic decision logic that mimics thresholds.
+- Provider hygiene: timeouts, malformed JSON, schema validation, safe defaults (**refuse/escalate**) on failure, with rationale and `failure.kind` distinguishing **decision-step** vs **notify-reply** OpenAI failures when applicable.
+- **Decision mock mode** (`EXECUTION_DECISION_USE_MOCK` or missing API key): deterministic `mockLlmDecision` for the JSON decision only. If an API key is present, a **second** completion may still run after `execute_notify` to compose the user-visible “what happened” text (simulated inbox/calendar); without a key, the client shows a short fallback string.
 
 **LLM** owns:
 
-- Turning **structured payload + transcript + computed_signals** into one of five **`ExecutionDecision`** outcomes and a human-readable rationale.
+- **Call 1 — execution decision**: turning **structured payload + full transcript + computed_signals** into one of five **`ExecutionDecision`** outcomes and a human-readable rationale.
+- **Call 2 (optional)** — after **`execute_notify`**, a plain-text completion builds the assistant’s **simulated** follow-up message (`notifyAssistantMessage` on the trace); not used for the five-outcome JSON.
 - Nuanced multi-turn reasoning where regex is insufficient — e.g. retracted consent vs new topic, ambiguous “send it” after “wait for legal”, or when hints disagree with transcript (prompt instructs careful reading).
 
 The contract is strict: the model receives **`computed_signals`** but must obey **hard rules** in the system prompt (policy, missing slots, explicit confirmation paths).
@@ -57,7 +58,7 @@ The contract is strict: the model receives **`computed_signals`** but must obey 
 
 | Deterministic (always in code first) | Model decides (when LLM invoked) |
 |----------------------------------------|-----------------------------------|
-| Regex-based **proposed action** summary, tags, score tier from **current intent text**. | Which of the five outcomes applies **given full transcript**, subject to gates below. |
+| Regex-based **proposed action** summary, tags, score tier from the **latest user message** (not scenario fixtures). | Which of the five outcomes applies **given full transcript**, subject to gates below. |
 | Missing slots / **ask_clarify** short-circuit when critical parameters missing. | Rationale wording and nuanced tie-breaks when gates are clear. |
 | Injection / payout-freeze **policy_blocked** → **refuse_escalate** without LLM. | Interpreting multi-turn threads (wait vs affirm, independent new requests). |
 | **`risk_score`**, thresholds, contradiction flag, VIP boost inputs. | Mapping situation to execute_silent vs notify vs confirm_first vs refuse when **not** short-circuited. |
@@ -84,13 +85,13 @@ Prompts are built in `lib/prompt.ts`; full text is exposed in the UI trace for a
 
 | Mode | Behavior |
 |------|----------|
-| **Policy / missing-context short-circuit** | LLM skipped on purpose — trace marks `policy_short_circuit` or `missing_critical_context`. |
-| **Simulated missing context** (`simulateFailure`) | Forces clarify path for demos. |
-| **LLM timeout / provider error** | Default **refuse_escalate** — no silent execution on infra failure. |
-| **Malformed or non-schema JSON** | Parse failure → refuse_escalate with trace `failure.kind`. |
-| **Mock LLM mode** | Deterministic surrogate; labeled in raw output for transparency. |
+| **Policy / missing-context short-circuit** | LLM skipped on purpose — trace marks `policy_short_circuit` or real `missing_critical_context` when slots are missing. |
+| **OpenAI failure on decision JSON call** | **`refuse_escalate`** — rationale and `failure.message` state an OpenAI error **during the execution decision step** (no raw provider text to the client). |
+| **OpenAI failure on notify-reply call** | If the outcome was **`execute_notify`** but the follow-up completion fails, decision is coerced to **`refuse_escalate`** with rationale / failure metadata referring to the **notify-reply** step. |
+| **Malformed or non-schema JSON** | Parse failure → refuse_escalate; `failure.kind` **`parse_error`**, message attributes bad OpenAI JSON for the decision schema. |
+| **Decision mock LLM mode** | Deterministic surrogate for **call 1**; labeled in raw output. Notify-reply (**call 2**) still uses OpenAI when `OPENAI_API_KEY` is set. |
 
-Operational risks not fully solved here: adversarial prompts that avoid regexes, multilingual inputs, inconsistent model adherence to JSON-only output, and **Stale intent** if UI/session state diverges from transcript (mitigated in the app via draft vs committed messages).
+Operational risks not fully solved here: adversarial prompts that avoid regexes, multilingual inputs, inconsistent model adherence to JSON-only output, **short latest lines** (“send it”) that need full-thread context for tagging, and **UI/session drift** vs transcript (mitigated via draft vs committed messages).
 
 ---
 

@@ -28,16 +28,18 @@ function buildSummary(signals: string[]): string {
     return "Money movement, payout, or transfer (inferred from conversation)";
   if (signals.includes("bulk_or_company_email"))
     return "Wide-audience or company-wide email (inferred from conversation)";
-  if (signals.includes("external_sensitive_email"))
-    return "Outbound email to external / partner / client contacts (inferred)";
   if (signals.includes("credential_or_pii_email"))
     return "Sharing passwords, financial, or sensitive details via message or email (inferred)";
+  if (signals.includes("external_sensitive_email"))
+    return "Outbound email to external / partner / client contacts (inferred)";
   if (signals.includes("calendar_high_impact"))
     return "Destructive or org-wide calendar change (inferred from conversation)";
   if (signals.includes("bypass_safety"))
     return "Bypass confirmations, filters, or normal safeguards (inferred)";
   if (signals.includes("reminder_scheduling_soft"))
     return "Reminder or lightweight scheduling cue (inferred)";
+  if (signals.includes("email_content_lookup"))
+    return "Read-only email / thread listing or message body (inferred)";
   if (signals.includes("information_lookup"))
     return "Read-only information lookup (calendar, inbox, or summary — inferred)";
   if (signals.includes("read_calendar_only"))
@@ -48,30 +50,16 @@ function buildSummary(signals: string[]): string {
 }
 
 /**
- * Text span for regex-based proposed-action inference: the **current** user request,
- * not the entire thread. User messages after the latest assistant turn stay grouped
- * (multi-bubble replies); with no assistant turn, only the latest user message is used
- * so a prior adversarial line cannot inflate risk for a later safe message.
+ * Text span for regex-based proposed-action inference: the **latest user message only**.
+ * Consecutive user bubbles after an assistant reply are treated as separate intents (calendar,
+ * then an unsafe ask, then a reminder); merging them caused the last harmless line to inherit
+ * danger tags from an earlier message.
  */
 /** Same scope as proposed-action regex inference; also used by `signals`. */
 export function textForProposedActionInference(messages: ChatMessage[]): string {
-  let lastAssistantIdx = -1;
-  for (let i = 0; i < messages.length; i++) {
-    if (messages[i]!.role === "assistant") lastAssistantIdx = i;
-  }
-
-  if (lastAssistantIdx !== -1) {
-    return messages
-      .slice(lastAssistantIdx + 1)
-      .filter((m) => m.role === "user")
-      .map((m) => m.content)
-      .join("\n")
-      .toLowerCase();
-  }
-
   const users = messages.filter((m) => m.role === "user");
   if (users.length === 0) return "";
-  return users[users.length - 1]!.content.toLowerCase();
+  return users[users.length - 1]!.content.trim().toLowerCase();
 }
 
 /**
@@ -140,10 +128,28 @@ export function inferProposedActionFromMessages(
 
   if (
     /schedule|book|put on (my )?calendar|invite|meet(ing)? with/i.test(t) ||
-    /\b(remind me|reminder)\b/i.test(t)
+    /\b(remind me|reminder|notification|alarm|alert)\b/i.test(t) ||
+    /\bset (a |an )?(notification|reminder|alarm)\b/i.test(t)
   ) {
     score += 0.12;
     matched_signals.push("reminder_scheduling_soft");
+  }
+
+  const emailContentLookup =
+    /\b(read|tell me|show me)\s+(me\s+)?(what\s+)?(the\s+)?(vip\s+)?(email|thread|mail|message)\b/i.test(
+      t,
+    ) ||
+    /\bwhat\s+(does|did)\s+(the\s+)?(vip\s+)?(email|thread)\s+(say|contain)/i.test(t) ||
+    /\bplease read\b.*\b(email|what|the)\b/i.test(t) ||
+    /\b(email|thread)\s+(says|said|body|contents?)\b/i.test(t) ||
+    /\b(which|what was|what are)\b.*\b(one of )?(the\s+)?(vip\s+)?emails?\b/i.test(t) ||
+    /\bwhat\s+was\s+one\s+of\s+the\s+emails/i.test(t) ||
+    /\b(emails?|threads?)\b.*\b(what|which|say|about)\b/i.test(t) ||
+    /\b(email|vip|roadmap|subject)\b.*\b(draft|thread|client)\b/i.test(t);
+
+  if (emailContentLookup) {
+    score += 0.07;
+    matched_signals.push("email_content_lookup");
   }
 
   if (
@@ -156,10 +162,11 @@ export function inferProposedActionFromMessages(
   }
 
   if (
-    /\b(tell me|give me|what (are|were)|list|summarize|how many)\b.*\b(meetings?|events?|inbox|unread|mail|messages?)\b/i.test(
+    !matched_signals.includes("email_content_lookup") &&
+    (/\b(tell me|give me|what (are|were)|list|summarize|how many)\b.*\b(meetings?|events?|inbox|unread|mail|messages?)\b/i.test(
       t,
     ) ||
-    /\b(check|look up|pull up)\s+(my\s+)?(schedule|calendar|inbox)\b/i.test(t)
+      /\b(check|look up|pull up)\s+(my\s+)?(schedule|calendar|inbox)\b/i.test(t))
   ) {
     score += 0.07;
     matched_signals.push("information_lookup");
@@ -184,22 +191,18 @@ export function inferProposedActionFromMessages(
   };
 }
 
-function effectiveScore(pa: ProposedAction): number {
-  if (pa.estimated_risk_score !== undefined) return pa.estimated_risk_score;
-  return tierBaseline(pa.danger_tier);
-}
-
+/**
+ * Effective classification for the API is **always** from `inferProposedActionFromMessages`:
+ * danger tier and tags follow the **latest user message** only (see `textForProposedActionInference`).
+ *
+ * Scenario JSON may still include a `proposedAction` as documentation for the bundled transcript,
+ * but it is **not** merged or used as a floor — so a harmless new line after a risky scenario
+ * demo is not stuck at the fixture’s tier.
+ */
 export function resolveEffectiveProposedAction(
-  scenarioId: string,
-  scenarioBody: { proposedAction: ProposedAction } | undefined,
+  _scenarioId: string,
+  _scenarioBody: { proposedAction: ProposedAction } | undefined,
   messages: ChatMessage[],
 ): ProposedAction {
-  const inferred = inferProposedActionFromMessages(messages);
-  if (scenarioId === NONE_SCENARIO_ID || !scenarioBody) {
-    return inferred;
-  }
-  const base = scenarioBody.proposedAction;
-  const si = effectiveScore(inferred);
-  const sb = effectiveScore(base);
-  return si > sb ? inferred : base;
+  return inferProposedActionFromMessages(messages);
 }

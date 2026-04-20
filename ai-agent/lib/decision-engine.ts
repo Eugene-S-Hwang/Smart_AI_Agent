@@ -1,5 +1,6 @@
+import { buildExecuteNotifyReplyPrompts } from "./execute-notify-reply";
 import { buildPrompts } from "./prompt";
-import { completeDecisionChat } from "./openai";
+import { completeDecisionChat, completeExecuteNotifyReply } from "./openai";
 import { computeSignals } from "./signals";
 import type {
   DecideRequestBody,
@@ -14,7 +15,9 @@ import type {
 function proposedActionHasReadonlyInfo(pa: ProposedAction): boolean {
   const tags = pa.matched_signals ?? [];
   return (
-    tags.includes("read_calendar_only") || tags.includes("information_lookup")
+    tags.includes("read_calendar_only") ||
+    tags.includes("information_lookup") ||
+    tags.includes("email_content_lookup")
   );
 }
 
@@ -46,28 +49,6 @@ function applyReadOnlyInformationNotifyCoercion(
   }
 
   return parsed;
-}
-
-function mergeSimulatedMissingContext(
-  signals: DecisionSignals,
-  simulate: SimulateFailure | undefined,
-): DecisionSignals {
-  if (simulate !== "missing_critical_context") return signals;
-  return {
-    ...signals,
-    intent_resolved: false,
-    missing_critical_context: true,
-    missing_slots: Array.from(
-      new Set([
-        ...signals.missing_slots,
-        "simulated: critical deployment context (e.g. target env / reviewer)",
-      ]),
-    ),
-    notes: [
-      ...signals.notes,
-      "Simulation: forced missing critical context for demo.",
-    ],
-  };
 }
 
 function deterministicAskClarify(signals: DecisionSignals): ModelParsedJson {
@@ -235,12 +216,46 @@ function malformedRawOutput(): string {
   return `not-json-at-all { broken: true, trailing`;
 }
 
-export async function runDecisionPipeline(
+/**
+ * After execute_notify, generate the user-visible assistant message (simulated calendar/email) with a second model call.
+ * Skips when no API key; on failure coerces decision to refuse_escalate (OpenAI error — same as a failed decision call).
+ */
+async function maybeAttachExecuteNotifyReply(
+  trace: DecisionTrace,
+): Promise<DecisionTrace> {
+  if (trace.parsed.decision !== "execute_notify") return trace;
+  if (!process.env.OPENAI_API_KEY?.trim()) return trace;
+
+  const { system, user } = buildExecuteNotifyReplyPrompts(trace);
+  const result = await completeExecuteNotifyReply(system, user);
+  if (!result.ok) {
+    console.error("[execute-notify-reply] OpenAI request failed:", result.error);
+    const timedOut = Boolean(result.timedOut);
+    return {
+      ...trace,
+      parsed: {
+        decision: "refuse_escalate",
+        rationale:
+          "Refusing due to an OpenAI error while generating the simulated follow-up message (notify-reply step).",
+        clarifying_question: undefined,
+      },
+      notifyAssistantMessage: undefined,
+      failure: {
+        kind: timedOut ? "llm_timeout" : "provider_error",
+        message: timedOut
+          ? "OpenAI request timed out during the notify-reply step."
+          : "OpenAI request failed during the notify-reply step.",
+      },
+    };
+  }
+  return { ...trace, notifyAssistantMessage: result.content };
+}
+
+async function runDecisionCore(
   body: DecideRequestBody,
 ): Promise<DecisionTrace> {
   const simulate = body.simulateFailure ?? "none";
-  let signals = computeSignals(body);
-  signals = mergeSimulatedMissingContext(signals, simulate);
+  const signals = computeSignals(body);
 
   const prompts = buildPrompts(body, signals);
 
@@ -336,20 +351,25 @@ export async function runDecisionPipeline(
   if (!useMock) {
     const result = await completeDecisionChat(prompts);
     if (!result.ok) {
+      console.error(
+        "[execution-decision-layer] OpenAI request failed:",
+        result.error,
+      );
       return {
         inputs: body,
         signals,
         prompts,
-        raw_model_output: `(OpenAI request failed: ${result.error})`,
+        raw_model_output: "(OpenAI request failed.)",
         parsed: {
           decision: "refuse_escalate",
-          rationale: result.timedOut
-            ? "OpenAI request timed out — defaulting to refuse/escalate for safety."
-            : `OpenAI request failed — refusing for safety. (${result.error})`,
+          rationale:
+            "Refusing due to an OpenAI error while running the execution decision step.",
         },
         failure: {
           kind: result.timedOut ? "llm_timeout" : "provider_error",
-          message: result.error,
+          message: result.timedOut
+            ? "OpenAI request timed out during the execution decision step."
+            : "OpenAI request failed during the execution decision step.",
         },
       };
     }
@@ -377,11 +397,12 @@ export async function runDecisionPipeline(
         parsed: {
           decision: "refuse_escalate",
           rationale:
-            "Model returned JSON that does not match the expected decision schema — refusing.",
+            "Refusing due to an OpenAI response that could not be parsed as valid execution-decision JSON.",
         },
         failure: {
           kind: "parse_error",
-          message: "Could not parse JSON from OpenAI response.",
+          message:
+            "OpenAI returned a response that could not be parsed as valid decision JSON.",
         },
       };
     }
@@ -399,4 +420,11 @@ export async function runDecisionPipeline(
     raw_model_output,
     parsed,
   };
+}
+
+export async function runDecisionPipeline(
+  body: DecideRequestBody,
+): Promise<DecisionTrace> {
+  const trace = await runDecisionCore(body);
+  return maybeAttachExecuteNotifyReply(trace);
 }

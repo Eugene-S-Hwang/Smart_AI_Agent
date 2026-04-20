@@ -18,7 +18,6 @@ import {
   NONE_SCENARIO_ID,
   resolveEffectiveProposedAction,
 } from "@/lib/proposed-action";
-import { mockAssistantMessageForExecuteNotify } from "@/lib/mock-execute-notify-message";
 import type {
   DecisionTrace,
   ChatMessage,
@@ -47,6 +46,9 @@ function pretty(v: unknown): string {
   return JSON.stringify(v, null, 2);
 }
 
+const EXECUTE_NOTIFY_FALLBACK =
+  "Simulated follow-up was not generated. Set OPENAI_API_KEY so the server can compose the notify reply, or check logs if the key is already set.";
+
 const FAILURE_OPTIONS: { value: SimulateFailure; label: string }[] = [
   { value: "none", label: "None (normal path)" },
   {
@@ -56,10 +58,6 @@ const FAILURE_OPTIONS: { value: SimulateFailure; label: string }[] = [
   {
     value: "malformed_output",
     label: "Simulate malformed model output",
-  },
-  {
-    value: "missing_critical_context",
-    label: "Simulate missing critical context (forced)",
   },
 ];
 
@@ -133,7 +131,12 @@ export default function Home() {
         setTimeline(p.timeline);
         setUserState(p.userState);
         setLlmInstructions(p.llmInstructions ?? "");
-        setSimulateFailure((p.simulateFailure as SimulateFailure) ?? "none");
+        const persistedSf = p.simulateFailure as string | undefined;
+        setSimulateFailure(
+          persistedSf === "llm_timeout" || persistedSf === "malformed_output"
+            ? persistedSf
+            : "none",
+        );
         setComposerText(
           typeof p.composerDraft === "string" ? p.composerDraft : "",
         );
@@ -292,7 +295,7 @@ export default function Home() {
           type: "message",
           message: {
             role: "assistant",
-            content: mockAssistantMessageForExecuteNotify(t),
+            content: t.notifyAssistantMessage?.trim() || EXECUTE_NOTIFY_FALLBACK,
           },
         });
       }
@@ -400,7 +403,7 @@ export default function Home() {
             <strong className="font-medium text-zinc-800 dark:text-zinc-200">
               danger tier + score + signal tags
             </strong>{" "}
-            from the current user intent window (merged with a preloaded scenario when selected).
+            inferred from the <strong className="font-medium text-zinc-800 dark:text-zinc-200">latest user message</strong> only; scenario bundles only load transcript and context, not a sticky danger level.
             Type in the chat box and press <strong className="font-medium text-zinc-800 dark:text-zinc-200">Send</strong> to add your line and run the pipeline. To evaluate the transcript without typing (e.g. after loading a scenario), use <strong className="font-medium text-zinc-800 dark:text-zinc-200">Re-run decision</strong> under Input.
           </p>
         </header>
@@ -437,8 +440,7 @@ export default function Home() {
                 Effective proposed action (computed for API)
               </p>
               <p className="mt-1 text-xs text-amber-900/80 dark:text-amber-300/90">
-                Higher inferred score (current intent window) overrides a milder preloaded scenario.
-                “No scenario” infers only from messages.
+                Tier and tags come from the <span className="font-medium">latest user line</span> only — not from earlier turns and not from the scenario fixture. The full transcript still goes to the decision model.
               </p>
               <p className="mt-2 font-medium text-amber-950 dark:text-amber-100">
                 {effectiveProposedAction.summary}
