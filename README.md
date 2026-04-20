@@ -123,18 +123,3 @@ As tool breadth grows (payments, org-wide admin, CRM writes, cross-account linki
 **Coordinator + specialist agents.** Evolve toward one **primary agent** the user talks to, which delegates to **worker agents** scoped to domains (e.g. inbox vs calendar vs money movement). Workers propose or execute only within their toolset; they **escalate back to the coordinator** when something is ambiguous, blocked by policy, or needs user-visible confirmation—similar to how a lead routes work to specialists and pulls threads back when clarification is needed. The coordinator keeps **one conversation thread and one audit story**: policy and execution decisions stay traceable in a single place instead of scattering across isolated bots.
 
 ---
-
-## Getting started (development)
-
-```bash
-cd ai-agent
-npm install
-npm run dev
-```
-
-Open [http://localhost:3000](http://localhost:3000). Set `OPENAI_API_KEY` in `.env.local` for live model calls; otherwise the pipeline runs in mock decision mode.
-
-```bash
-npm run build   # production build
-npm run lint    # eslint
-```
