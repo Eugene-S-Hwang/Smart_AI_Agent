@@ -7,12 +7,13 @@ import type {
 
 const SILENT_THRESHOLD = 0.38;
 
-/** Clarify when the transcript implies an act but targets/times/recipients are unclear. */
+/**
+ * Clarify when the **current** intent implies an act but targets/times/recipients are unclear.
+ * Uses the same scope as proposed-action inference so an unrelated earlier user line does not
+ * leave phantom missing slots for the latest request.
+ */
 function missingSlotsFromTranscript(body: DecideRequestBody): string[] {
-  const text = body.conversationHistory
-    .map((m) => m.content)
-    .join("\n")
-    .toLowerCase();
+  const text = textForProposedActionInference(body.conversationHistory);
   const missing: string[] = [];
 
   const wantsSend =

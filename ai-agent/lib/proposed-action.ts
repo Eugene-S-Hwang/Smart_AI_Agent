@@ -38,6 +38,8 @@ function buildSummary(signals: string[]): string {
     return "Bypass confirmations, filters, or normal safeguards (inferred)";
   if (signals.includes("reminder_scheduling_soft"))
     return "Reminder or lightweight scheduling cue (inferred)";
+  if (signals.includes("information_lookup"))
+    return "Read-only information lookup (calendar, inbox, or summary — inferred)";
   if (signals.includes("read_calendar_only"))
     return "Read-only calendar or availability check (inferred)";
   if (signals.includes("routine_email_low"))
@@ -145,12 +147,22 @@ export function inferProposedActionFromMessages(
   }
 
   if (
-    /what'?s on (my )?calendar|show (my )?(schedule|today)|am i free|when am i busy/i.test(
+    /what'?s on (my )?calendar|show\s+(me\s+)?(my\s+)?(today'?s\s+)?calendar|show\s+(me\s+)?(my\s+)?schedule\b|show\s+(my\s+)?today\b|today'?s\s+calendar|am i free|when am i busy/i.test(
       t,
     )
   ) {
     score += 0.06;
     matched_signals.push("read_calendar_only");
+  }
+
+  if (
+    /\b(tell me|give me|what (are|were)|list|summarize|how many)\b.*\b(meetings?|events?|inbox|unread|mail|messages?)\b/i.test(
+      t,
+    ) ||
+    /\b(check|look up|pull up)\s+(my\s+)?(schedule|calendar|inbox)\b/i.test(t)
+  ) {
+    score += 0.07;
+    matched_signals.push("information_lookup");
   }
 
   if (

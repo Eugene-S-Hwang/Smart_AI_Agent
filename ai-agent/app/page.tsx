@@ -18,6 +18,7 @@ import {
   NONE_SCENARIO_ID,
   resolveEffectiveProposedAction,
 } from "@/lib/proposed-action";
+import { mockAssistantMessageForExecuteNotify } from "@/lib/mock-execute-notify-message";
 import type {
   DecisionTrace,
   ChatMessage,
@@ -111,18 +112,8 @@ export default function Home() {
   }, [scenarioId, selectedMeta, messagesIncludingDraft]);
 
   const trimmedComposer = composerText.trim();
-  const lastCommittedUser = lastUserContent(chatMessages)?.trim();
-  const draftIsExtraUserLine =
-    Boolean(trimmedComposer) &&
-    (lastCommittedUser === undefined ||
-      trimmedComposer !== lastCommittedUser);
-  const primaryChatButtonLabel = loading
-    ? "Deciding…"
-    : draftIsExtraUserLine
-      ? "Add & decide"
-      : "Run decision";
-  const primaryChatDisabled =
-    loading || messagesIncludingDraft.length === 0;
+  const primaryChatButtonLabel = loading ? "Deciding…" : "Send";
+  const primaryChatDisabled = loading || !trimmedComposer;
 
   useEffect(() => {
     queueMicrotask(() => {
@@ -296,6 +287,16 @@ export default function Home() {
         }
       }
 
+      if (t.parsed.decision === "execute_notify") {
+        events.push({
+          type: "message",
+          message: {
+            role: "assistant",
+            content: mockAssistantMessageForExecuteNotify(t),
+          },
+        });
+      }
+
       setTimeline(events);
       if (pendingInsertsBubble) {
         setComposerText("");
@@ -319,30 +320,25 @@ export default function Home() {
   async function submitComposerOrRunPipeline() {
     if (loading) return;
     const trimmed = composerText.trim();
+    if (!trimmed) return;
+
     const stripped = strippedTimelineForRun();
     const baseMsgs = messagesFromTimeline(stripped);
     const lastBaseUser = lastUserContent(baseMsgs)?.trim();
 
-    if (baseMsgs.length === 0 && !trimmed) {
-      setRequestError(
-        "Add at least one message (or pick a scenario with a transcript).",
-      );
+    setTrace(null);
+
+    if (baseMsgs.length === 0) {
+      await runPipeline(stripped, { commitPendingUser: trimmed });
       return;
     }
 
-    setTrace(null);
-
-    if (
-      baseMsgs.length > 0 &&
-      (!trimmed || lastBaseUser === trimmed)
-    ) {
+    if (lastBaseUser === trimmed) {
       await runPipeline(stripped);
       return;
     }
 
-    if (trimmed) {
-      await runPipeline(stripped, { commitPendingUser: trimmed });
-    }
+    await runPipeline(stripped, { commitPendingUser: trimmed });
   }
 
   async function runDecision() {
@@ -405,7 +401,7 @@ export default function Home() {
               danger tier + score + signal tags
             </strong>{" "}
             from the current user intent window (merged with a preloaded scenario when selected).
-            Use <strong className="font-medium text-zinc-800 dark:text-zinc-200">Run decision</strong> on the loaded transcript, or type a new line and use <strong className="font-medium text-zinc-800 dark:text-zinc-200">Add & decide</strong>.
+            Type in the chat box and press <strong className="font-medium text-zinc-800 dark:text-zinc-200">Send</strong> to add your line and run the pipeline. To evaluate the transcript without typing (e.g. after loading a scenario), use <strong className="font-medium text-zinc-800 dark:text-zinc-200">Re-run decision</strong> under Input.
           </p>
         </header>
 
@@ -418,15 +414,12 @@ export default function Home() {
               </h2>
               <p className="text-xs text-zinc-500">
                 Scenarios load prior turns into the thread; the latest user line stays in the
-                composer until you run the decision (then it appears as sent above).{" "}
-                <span className="font-medium text-zinc-600 dark:text-zinc-400">
-                  Run decision
-                </span>{" "}
-                evaluates the chat as-is;{" "}
-                <span className="font-medium text-zinc-600 dark:text-zinc-400">
-                  Add & decide
-                </span>{" "}
-                appends your text first. Persists after refresh.
+                composer until you <span className="font-medium text-zinc-600 dark:text-zinc-400">Send</span>{" "}
+                (then it appears as sent above).{" "}
+                <span className="font-medium text-zinc-600 dark:text-zinc-400">Send</span> only works when the
+                box has text. To run the decision on the loaded transcript without sending a new line, use{" "}
+                <span className="font-medium text-zinc-600 dark:text-zinc-400">Re-run decision</span> under Input.
+                Persists after refresh.
               </p>
             </div>
             <button
@@ -501,7 +494,7 @@ export default function Home() {
             {timeline.length === 0 && (
               <p className="text-center text-sm text-zinc-500">
                 {trimmedComposer
-                  ? "Nothing sent yet — your line is only in the composer until you run the decision."
+                  ? "Nothing sent yet — your line is only in the composer until you press Send."
                   : "No messages — pick a scenario or type below."}
               </p>
             )}
@@ -523,8 +516,8 @@ export default function Home() {
                 }}
                 placeholder={
                   chatMessages.length > 0 || trimmedComposer
-                    ? "Your next user message (shown here until you run — then it appears in the thread)"
-                    : "Type a user message to start…"
+                    ? "Your next user message — Send adds it to the thread and runs the pipeline"
+                    : "Type a message, then Send…"
                 }
                 className="min-w-0 flex-1 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-600 dark:bg-zinc-950"
               />
@@ -650,7 +643,7 @@ export default function Home() {
             >
               {loading
                 ? "Running…"
-                : "Re-run decision (same as Run decision in the chat bar)"}
+                : "Re-run decision (run pipeline on current thread without using Send)"}
             </button>
 
             {requestError && (

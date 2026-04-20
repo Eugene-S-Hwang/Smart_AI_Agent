@@ -6,9 +6,47 @@ import type {
   DecisionTrace,
   ExecutionDecision,
   ModelParsedJson,
+  ProposedAction,
   SimulateFailure,
   DecisionSignals,
 } from "./types";
+
+function proposedActionHasReadonlyInfo(pa: ProposedAction): boolean {
+  const tags = pa.matched_signals ?? [];
+  return (
+    tags.includes("read_calendar_only") || tags.includes("information_lookup")
+  );
+}
+
+/** Read-only lookups should surface results to the user; also recover from erroneous refusal when the latest intent is benign. */
+function applyReadOnlyInformationNotifyCoercion(
+  body: DecideRequestBody,
+  signals: DecisionSignals,
+  parsed: ModelParsedJson,
+): ModelParsedJson {
+  if (signals.policy_blocked || signals.missing_critical_context) return parsed;
+  if (!proposedActionHasReadonlyInfo(body.proposedAction)) return parsed;
+
+  if (parsed.decision === "refuse_escalate") {
+    return {
+      ...parsed,
+      decision: "execute_notify",
+      rationale:
+        "Current intent is read-only information retrieval with no policy block — use notify-after so results are visible; unrelated earlier turns do not justify refusal.",
+    };
+  }
+
+  if (parsed.decision === "execute_silent") {
+    return {
+      ...parsed,
+      decision: "execute_notify",
+      rationale:
+        "Read-only information retrieval — notify after so the user sees what was fetched.",
+    };
+  }
+
+  return parsed;
+}
 
 function mergeSimulatedMissingContext(
   signals: DecisionSignals,
@@ -110,6 +148,14 @@ function mockLlmDecision(
 
   const r = signals.risk_score;
   const st = signals.silent_threshold;
+
+  if (r < st && proposedActionHasReadonlyInfo(body.proposedAction)) {
+    return {
+      decision: "execute_notify",
+      rationale:
+        "Read-only information lookup — low risk; notify-after so the user sees retrieved details (mock).",
+    };
+  }
 
   if (signals.contradiction_flag && signals.risk_tier !== "low") {
     return {
@@ -310,9 +356,10 @@ export async function runDecisionPipeline(
 
     const raw = result.content;
     try {
-      const parsed = applyExplicitConfirmationCoercion(
+      const parsed = applyReadOnlyInformationNotifyCoercion(
+        body,
         signals,
-        parseModelJson(raw),
+        applyExplicitConfirmationCoercion(signals, parseModelJson(raw)),
       );
       return {
         inputs: body,
